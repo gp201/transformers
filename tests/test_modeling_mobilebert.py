@@ -17,26 +17,26 @@
 import unittest
 
 from transformers import is_torch_available
+from transformers.testing_utils import require_sentencepiece, require_tokenizers, require_torch, slow, torch_device
 
 from .test_configuration_common import ConfigTester
-from .test_modeling_common import ModelTesterMixin, floats_tensor, ids_tensor
-from .utils import require_torch, slow, torch_device
+from .test_modeling_common import ModelTesterMixin, floats_tensor, ids_tensor, random_attention_mask
 
 
 if is_torch_available():
     import torch
+
     from transformers import (
         MobileBertConfig,
-        MobileBertModel,
         MobileBertForMaskedLM,
+        MobileBertForMultipleChoice,
         MobileBertForNextSentencePrediction,
         MobileBertForPreTraining,
         MobileBertForQuestionAnswering,
         MobileBertForSequenceClassification,
         MobileBertForTokenClassification,
-        MobileBertForMultipleChoice,
+        MobileBertModel,
     )
-    from transformers.modeling_mobilebert import MOBILEBERT_PRETRAINED_MODEL_ARCHIVE_LIST
 
 
 class MobileBertModelTester:
@@ -95,7 +95,7 @@ class MobileBertModelTester:
 
         input_mask = None
         if self.use_input_mask:
-            input_mask = ids_tensor([self.batch_size, self.seq_length], vocab_size=2)
+            input_mask = random_attention_mask([self.batch_size, self.seq_length])
 
         token_type_ids = None
         if self.use_token_type_ids:
@@ -123,6 +123,7 @@ class MobileBertModelTester:
             type_vocab_size=self.type_vocab_size,
             is_decoder=False,
             initializer_range=self.initializer_range,
+            return_dict=True,
         )
 
         return config, input_ids, token_type_ids, input_mask, sequence_labels, token_labels, choice_labels
@@ -154,27 +155,18 @@ class MobileBertModelTester:
             encoder_attention_mask,
         )
 
-    def check_loss_output(self, result):
-        self.parent.assertListEqual(list(result["loss"].size()), [])
-
     def create_and_check_mobilebert_model(
         self, config, input_ids, token_type_ids, input_mask, sequence_labels, token_labels, choice_labels
     ):
         model = MobileBertModel(config=config)
         model.to(torch_device)
         model.eval()
-        sequence_output, pooled_output = model(input_ids, attention_mask=input_mask, token_type_ids=token_type_ids)
-        sequence_output, pooled_output = model(input_ids, token_type_ids=token_type_ids)
-        sequence_output, pooled_output = model(input_ids)
+        result = model(input_ids, attention_mask=input_mask, token_type_ids=token_type_ids)
+        result = model(input_ids, token_type_ids=token_type_ids)
+        result = model(input_ids)
 
-        result = {
-            "sequence_output": sequence_output,
-            "pooled_output": pooled_output,
-        }
-        self.parent.assertListEqual(
-            list(result["sequence_output"].size()), [self.batch_size, self.seq_length, self.hidden_size]
-        )
-        self.parent.assertListEqual(list(result["pooled_output"].size()), [self.batch_size, self.hidden_size])
+        self.parent.assertEqual(result.last_hidden_state.shape, (self.batch_size, self.seq_length, self.hidden_size))
+        self.parent.assertEqual(result.pooler_output.shape, (self.batch_size, self.hidden_size))
 
     def create_and_check_mobilebert_model_as_decoder(
         self,
@@ -191,29 +183,23 @@ class MobileBertModelTester:
         model = MobileBertModel(config)
         model.to(torch_device)
         model.eval()
-        sequence_output, pooled_output = model(
+        result = model(
             input_ids,
             attention_mask=input_mask,
             token_type_ids=token_type_ids,
             encoder_hidden_states=encoder_hidden_states,
             encoder_attention_mask=encoder_attention_mask,
         )
-        sequence_output, pooled_output = model(
+        result = model(
             input_ids,
             attention_mask=input_mask,
             token_type_ids=token_type_ids,
             encoder_hidden_states=encoder_hidden_states,
         )
-        sequence_output, pooled_output = model(input_ids, attention_mask=input_mask, token_type_ids=token_type_ids)
+        result = model(input_ids, attention_mask=input_mask, token_type_ids=token_type_ids)
 
-        result = {
-            "sequence_output": sequence_output,
-            "pooled_output": pooled_output,
-        }
-        self.parent.assertListEqual(
-            list(result["sequence_output"].size()), [self.batch_size, self.seq_length, self.hidden_size]
-        )
-        self.parent.assertListEqual(list(result["pooled_output"].size()), [self.batch_size, self.hidden_size])
+        self.parent.assertEqual(result.last_hidden_state.shape, (self.batch_size, self.seq_length, self.hidden_size))
+        self.parent.assertEqual(result.pooler_output.shape, (self.batch_size, self.hidden_size))
 
     def create_and_check_mobilebert_for_masked_lm(
         self, config, input_ids, token_type_ids, input_mask, sequence_labels, token_labels, choice_labels
@@ -221,17 +207,8 @@ class MobileBertModelTester:
         model = MobileBertForMaskedLM(config=config)
         model.to(torch_device)
         model.eval()
-        loss, prediction_scores = model(
-            input_ids, attention_mask=input_mask, token_type_ids=token_type_ids, labels=token_labels
-        )
-        result = {
-            "loss": loss,
-            "prediction_scores": prediction_scores,
-        }
-        self.parent.assertListEqual(
-            list(result["prediction_scores"].size()), [self.batch_size, self.seq_length, self.vocab_size]
-        )
-        self.check_loss_output(result)
+        result = model(input_ids, attention_mask=input_mask, token_type_ids=token_type_ids, labels=token_labels)
+        self.parent.assertEqual(result.logits.shape, (self.batch_size, self.seq_length, self.vocab_size))
 
     def create_and_check_mobilebert_for_next_sequence_prediction(
         self, config, input_ids, token_type_ids, input_mask, sequence_labels, token_labels, choice_labels
@@ -239,15 +216,13 @@ class MobileBertModelTester:
         model = MobileBertForNextSentencePrediction(config=config)
         model.to(torch_device)
         model.eval()
-        loss, seq_relationship_score = model(
-            input_ids, attention_mask=input_mask, token_type_ids=token_type_ids, next_sentence_label=sequence_labels,
+        result = model(
+            input_ids,
+            attention_mask=input_mask,
+            token_type_ids=token_type_ids,
+            next_sentence_label=sequence_labels,
         )
-        result = {
-            "loss": loss,
-            "seq_relationship_score": seq_relationship_score,
-        }
-        self.parent.assertListEqual(list(result["seq_relationship_score"].size()), [self.batch_size, 2])
-        self.check_loss_output(result)
+        self.parent.assertEqual(result.logits.shape, (self.batch_size, 2))
 
     def create_and_check_mobilebert_for_pretraining(
         self, config, input_ids, token_type_ids, input_mask, sequence_labels, token_labels, choice_labels
@@ -255,23 +230,15 @@ class MobileBertModelTester:
         model = MobileBertForPreTraining(config=config)
         model.to(torch_device)
         model.eval()
-        loss, prediction_scores, seq_relationship_score = model(
+        result = model(
             input_ids,
             attention_mask=input_mask,
             token_type_ids=token_type_ids,
             labels=token_labels,
             next_sentence_label=sequence_labels,
         )
-        result = {
-            "loss": loss,
-            "prediction_scores": prediction_scores,
-            "seq_relationship_score": seq_relationship_score,
-        }
-        self.parent.assertListEqual(
-            list(result["prediction_scores"].size()), [self.batch_size, self.seq_length, self.vocab_size]
-        )
-        self.parent.assertListEqual(list(result["seq_relationship_score"].size()), [self.batch_size, 2])
-        self.check_loss_output(result)
+        self.parent.assertEqual(result.prediction_logits.shape, (self.batch_size, self.seq_length, self.vocab_size))
+        self.parent.assertEqual(result.seq_relationship_logits.shape, (self.batch_size, 2))
 
     def create_and_check_mobilebert_for_question_answering(
         self, config, input_ids, token_type_ids, input_mask, sequence_labels, token_labels, choice_labels
@@ -279,21 +246,15 @@ class MobileBertModelTester:
         model = MobileBertForQuestionAnswering(config=config)
         model.to(torch_device)
         model.eval()
-        loss, start_logits, end_logits = model(
+        result = model(
             input_ids,
             attention_mask=input_mask,
             token_type_ids=token_type_ids,
             start_positions=sequence_labels,
             end_positions=sequence_labels,
         )
-        result = {
-            "loss": loss,
-            "start_logits": start_logits,
-            "end_logits": end_logits,
-        }
-        self.parent.assertListEqual(list(result["start_logits"].size()), [self.batch_size, self.seq_length])
-        self.parent.assertListEqual(list(result["end_logits"].size()), [self.batch_size, self.seq_length])
-        self.check_loss_output(result)
+        self.parent.assertEqual(result.start_logits.shape, (self.batch_size, self.seq_length))
+        self.parent.assertEqual(result.end_logits.shape, (self.batch_size, self.seq_length))
 
     def create_and_check_mobilebert_for_sequence_classification(
         self, config, input_ids, token_type_ids, input_mask, sequence_labels, token_labels, choice_labels
@@ -302,15 +263,8 @@ class MobileBertModelTester:
         model = MobileBertForSequenceClassification(config)
         model.to(torch_device)
         model.eval()
-        loss, logits = model(
-            input_ids, attention_mask=input_mask, token_type_ids=token_type_ids, labels=sequence_labels
-        )
-        result = {
-            "loss": loss,
-            "logits": logits,
-        }
-        self.parent.assertListEqual(list(result["logits"].size()), [self.batch_size, self.num_labels])
-        self.check_loss_output(result)
+        result = model(input_ids, attention_mask=input_mask, token_type_ids=token_type_ids, labels=sequence_labels)
+        self.parent.assertEqual(result.logits.shape, (self.batch_size, self.num_labels))
 
     def create_and_check_mobilebert_for_token_classification(
         self, config, input_ids, token_type_ids, input_mask, sequence_labels, token_labels, choice_labels
@@ -319,13 +273,8 @@ class MobileBertModelTester:
         model = MobileBertForTokenClassification(config=config)
         model.to(torch_device)
         model.eval()
-        loss, logits = model(input_ids, attention_mask=input_mask, token_type_ids=token_type_ids, labels=token_labels)
-        result = {
-            "loss": loss,
-            "logits": logits,
-        }
-        self.parent.assertListEqual(list(result["logits"].size()), [self.batch_size, self.seq_length, self.num_labels])
-        self.check_loss_output(result)
+        result = model(input_ids, attention_mask=input_mask, token_type_ids=token_type_ids, labels=token_labels)
+        self.parent.assertEqual(result.logits.shape, (self.batch_size, self.seq_length, self.num_labels))
 
     def create_and_check_mobilebert_for_multiple_choice(
         self, config, input_ids, token_type_ids, input_mask, sequence_labels, token_labels, choice_labels
@@ -337,18 +286,13 @@ class MobileBertModelTester:
         multiple_choice_inputs_ids = input_ids.unsqueeze(1).expand(-1, self.num_choices, -1).contiguous()
         multiple_choice_token_type_ids = token_type_ids.unsqueeze(1).expand(-1, self.num_choices, -1).contiguous()
         multiple_choice_input_mask = input_mask.unsqueeze(1).expand(-1, self.num_choices, -1).contiguous()
-        loss, logits = model(
+        result = model(
             multiple_choice_inputs_ids,
             attention_mask=multiple_choice_input_mask,
             token_type_ids=multiple_choice_token_type_ids,
             labels=choice_labels,
         )
-        result = {
-            "loss": loss,
-            "logits": logits,
-        }
-        self.parent.assertListEqual(list(result["logits"].size()), [self.batch_size, self.num_choices])
-        self.check_loss_output(result)
+        self.parent.assertEqual(result.logits.shape, (self.batch_size, self.num_choices))
 
     def prepare_config_and_inputs_for_common(self):
         config_and_inputs = self.prepare_config_and_inputs()
@@ -454,21 +398,21 @@ class MobileBertModelTest(ModelTesterMixin, unittest.TestCase):
         config_and_inputs = self.model_tester.prepare_config_and_inputs()
         self.model_tester.create_and_check_mobilebert_for_token_classification(*config_and_inputs)
 
-    @slow
-    def test_model_from_pretrained(self):
-        for model_name in MOBILEBERT_PRETRAINED_MODEL_ARCHIVE_LIST[:1]:
-            model = MobileBertModel.from_pretrained(model_name)
-            self.assertIsNotNone(model)
-
 
 def _long_tensor(tok_lst):
-    return torch.tensor(tok_lst, dtype=torch.long, device=torch_device,)
+    return torch.tensor(
+        tok_lst,
+        dtype=torch.long,
+        device=torch_device,
+    )
 
 
 TOLERANCE = 1e-3
 
 
 @require_torch
+@require_sentencepiece
+@require_tokenizers
 class MobileBertModelIntegrationTests(unittest.TestCase):
     @slow
     def test_inference_no_head(self):
